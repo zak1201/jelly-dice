@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F2EDE5">
+<title>Jelly Dice</title>
+<meta name="description" content="Jelly Dice — a WebGPU playground of heavy, translucent jelly dice and objects you can grab, stretch, poke and roll. 果冻骰子：可以抓、拉、戳、掷的半透明果冻骰子与小物件。">
+<noscript><style>.controls, .hint { opacity: .28; pointer-events: none; } .status i { background: #C8323C !important; animation: none !important; }</style></noscript>
+<style>
+  /* ------------------------------------------------------------------------
+     Design tokens (see DESIGN.md). Warm paper stage, ink type, 1px hairlines.
+     ------------------------------------------------------------------------ */
+  :root {
+    --paper: #F2EDE5;
+    --ink: #1D1A17;
+    --ink-2: #6E665D;
+    --ink-3: #9C948A;
+    --hair: rgba(29, 26, 23, .14);
+    --hair-strong: rgba(29, 26, 23, .30);
+    --flavor: #14A673;
+    --serif: "Iowan Old Style", "Hoefler Text", "Baskerville", "Palatino Linotype", "Palatino", "Georgia", "Noto Serif", serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", "Roboto", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", "Noto Sans", "Arial", sans-serif;
+    --serif-zh: "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", serif;
+    --pad-x: clamp(20px, 2.8vw, 44px);
+    --pad-y: clamp(18px, 2.6vw, 38px);
+    --ease: cubic-bezier(.2, .7, .2, 1);
+    --sheet-h: 0px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); overflow: hidden; }
+  body {
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+
+  /* Full-bleed WebGPU stage */
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+  #stage.can-grab { cursor: grab; }
+  #stage.grabbing, #stage.orbiting { cursor: grabbing; }
+
+  /* UI floats above the canvas; only real controls catch the pointer */
+  #ui { position: fixed; inset: 0; pointer-events: none; }
+  .topbar, .controls { pointer-events: auto; }
+
+  /* ---- Brand block ---- */
+  .brand {
+    position: absolute;
+    top: calc(var(--pad-y) + env(safe-area-inset-top));
+    left: calc(var(--pad-x) + env(safe-area-inset-left));
+  }
+  .eyebrow { margin: 0; font: 500 11px/1.2 var(--sans); letter-spacing: .22em; text-transform: uppercase; color: var(--ink-2); }
+  .eyebrow .sep { color: var(--ink-3); margin: 0 .35em; }
+  .title {
+    margin: 16px 0 0;
+    font: italic 400 clamp(64px, 8.6vw, 136px)/.84 var(--serif);
+    letter-spacing: -.03em;
+    color: var(--ink);
+  }
+  .title span { display: block; }
+  .title span + span { padding-left: .42em; }
+  :lang(zh) .title { font: 500 clamp(56px, 7.2vw, 116px)/.98 var(--serif-zh); letter-spacing: .02em; }
+  :lang(zh) .title span + span { padding-left: .9em; }
+  :lang(zh) .eyebrow, :lang(zh) .label, :lang(zh) .result-state { letter-spacing: .12em; }
+  :lang(zh) .caption { letter-spacing: .04em; }
+  :lang(zh) .flavor-name { font: 500 15px/1 var(--serif-zh); }
+  .caption { margin: 22px 0 0; font: 400 13px/1.55 var(--sans); color: var(--ink-2); }
+
+  /* ---- Top bar: status, sound, view ---- */
+  .topbar {
+    position: absolute;
+    top: calc(var(--pad-y) + env(safe-area-inset-top));
+    right: calc(var(--pad-x) + env(safe-area-inset-right));
+    display: flex; align-items: center; gap: 8px;
+  }
+  .status {
+    display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 13px 0 11px;
+    font: 500 12px/1 var(--sans); color: var(--ink-2);
+    border: 1px solid var(--hair); border-radius: 999px; white-space: nowrap;
+  }
+  .status i { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); flex: none; }
+  .status[data-state="checking"] i { animation: pulse 1s var(--ease) infinite; }
+  .status[data-state="ready"] i { background: #2E9E66; box-shadow: 0 0 0 3px rgba(46, 158, 102, .16); }
+  .status[data-state="error"] i { background: #C8323C; box-shadow: 0 0 0 3px rgba(200, 50, 60, .14); }
+  .btn {
+    appearance: none; height: 32px; padding: 0 14px; border: 1px solid var(--hair); border-radius: 999px;
+    background: transparent; color: var(--ink); font: 500 12.5px/1 var(--sans); letter-spacing: .01em;
+    cursor: pointer; white-space: nowrap;
+    transition: border-color .2s var(--ease), background-color .2s var(--ease);
+  }
+  .btn:hover { border-color: var(--hair-strong); background: rgba(29, 26, 23, .035); }
+  .btn[aria-pressed="true"] { border-color: var(--ink); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; }
+  .btn .sound-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 7px; background: var(--ink-3); }
+  .btn[aria-pressed="true"] .sound-dot { background: var(--ink); }
+  .ico { display: none; width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .ico path:first-child { fill: none; }
+  #soundBtn .ico .wave { display: none; }
+  #soundBtn[aria-pressed="true"] .ico .wave { display: inline; }
+  #soundBtn[aria-pressed="true"] .ico .mute { display: none; }
+
+  /* ---- Control column ---- */
+  .controls {
+    position: absolute;
+    right: calc(var(--pad-x) + env(safe-area-inset-right));
+    bottom: calc(var(--pad-y) + env(safe-area-inset-bottom));
+    width: 300px;
+  }
+  .label { font: 500 10.5px/1 var(--sans); letter-spacing: .18em; text-transform: uppercase; color: var(--ink-2); }
+  .result { padding-bottom: 14px; }
+  .result-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .result-state { font: 500 10.5px/1 var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); display: inline-flex; align-items: center; }
+  .result-body { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; min-height: 56px; margin-top: 12px; transition: opacity .24s var(--ease); }
+  .result[data-mode="rolling"] .result-body, .result[data-mode="moving"] .result-body { opacity: .32; }
+  .values { display: flex; gap: 6px; flex-wrap: wrap; }
+  .value {
+    width: 30px; height: 30px; border-radius: 9px; border: 1px solid var(--hair-strong);
+    display: grid; place-items: center; font: 500 13px/1 var(--sans); font-variant-numeric: tabular-nums;
+    animation: rise .32s var(--ease) both;
+  }
+  .total { display: flex; align-items: baseline; gap: 9px; white-space: nowrap; }
+  .total small { font: 500 10.5px/1 var(--sans); letter-spacing: .18em; text-transform: uppercase; color: var(--ink-2); }
+  .total span { font: italic 400 46px/1 var(--serif); letter-spacing: -.02em; font-variant-numeric: lining-nums; min-width: 1ch; text-align: right; }
+  .total span em { font: 400 .42em/1 var(--sans); letter-spacing: 0; color: var(--ink-2); margin-left: 3px; }
+  .value.word { width: auto; padding: 0 9px; font-size: 12px; white-space: nowrap; }
+  .dots { display: inline-flex; margin-left: 6px; }
+  .dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; margin-left: 3px; animation: dot .9s var(--ease) infinite; }
+  .dots i:nth-child(2) { animation-delay: .15s; }
+  .dots i:nth-child(3) { animation-delay: .3s; }
+
+  .row { display: grid; grid-template-columns: 68px 1fr; align-items: center; min-height: 48px; border-top: 1px solid var(--hair); }
+  .objsec { border-top: 1px solid var(--hair); padding: 12px 0 12px; }
+  .objhead { display: flex; justify-content: space-between; align-items: center; }
+  .linkbtn { appearance: none; border: 0; background: none; padding: 4px 0; font: 500 11.5px/1 var(--sans); color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--hair-strong); text-underline-offset: 3px; cursor: pointer; }
+  .linkbtn:hover { color: var(--ink); }
+  .objects { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
+  .chip {
+    appearance: none; height: 28px; min-width: 0; padding: 0 4px; border: 1px solid var(--hair); border-radius: 999px; background: transparent;
+    font: 500 11.5px/1 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+    transition: background-color .2s var(--ease), border-color .2s var(--ease), color .2s var(--ease);
+  }
+  .chip:hover { border-color: var(--hair-strong); }
+  .chip[aria-checked="true"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+  .objform { display: flex; gap: 6px; margin-top: 8px; }
+  .objform input {
+    flex: 1; min-width: 0; height: 32px; padding: 0 13px; border: 1px solid var(--hair); border-radius: 999px;
+    background: rgba(255, 255, 255, .34); color: var(--ink); font: 400 12.5px/1 var(--sans); -webkit-user-select: text; user-select: text;
+  }
+  .objform input::placeholder { color: var(--ink-3); }
+  .objform input:focus { outline: none; border-color: var(--ink); }
+  .objform button { appearance: none; height: 32px; padding: 0 13px; border: 1px solid var(--ink); border-radius: 999px; background: transparent; font: 500 12px/1 var(--sans); white-space: nowrap; cursor: pointer; }
+  .objform button:hover { background: rgba(29, 26, 23, .05); }
+  .objmsg { margin: 7px 0 0; font: 400 11.5px/1.45 var(--sans); color: var(--ink-2); }
+  .objmsg:empty { display: none; }
+  .swatch.natural { display: none; }
+  .swatches.has-natural .swatch.natural { display: block; }
+  body.shaping .objects, body.shaping .objform { opacity: .5; pointer-events: none; }
+  .swatches { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .swatch {
+    appearance: none; width: 18px; height: 18px; border-radius: 50%; border: 0; padding: 0; flex: none;
+    background: var(--c); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .10); cursor: pointer;
+    transition: transform .2s var(--ease), box-shadow .2s var(--ease);
+  }
+  .swatch:hover { transform: scale(1.12); }
+  .swatch[aria-checked="true"] { box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .10), 0 0 0 2px var(--paper), 0 0 0 3px var(--ink); }
+  .flavor-name { margin-left: auto; font: italic 400 17px/1 var(--serif); white-space: nowrap; }
+  .segmented { display: flex; gap: 4px; }
+  .segmented button {
+    appearance: none; width: 34px; height: 30px; border: 1px solid var(--hair); background: transparent; border-radius: 999px;
+    font: 500 12.5px/1 var(--sans); cursor: pointer; font-variant-numeric: tabular-nums;
+    transition: background-color .2s var(--ease), border-color .2s var(--ease), color .2s var(--ease);
+  }
+  .segmented button:hover { border-color: var(--hair-strong); }
+  .segmented button[aria-checked="true"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+  .roll {
+    appearance: none; margin-top: 14px; width: 100%; height: 50px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 9px 0 22px; border: 0; border-radius: 999px; background: var(--ink); color: var(--paper);
+    font: 500 14px/1 var(--sans); letter-spacing: .01em; cursor: pointer;
+    transition: transform .15s var(--ease), opacity .2s var(--ease);
+  }
+  .roll:hover { opacity: .92; }
+  .roll:active { transform: scale(.985); }
+  .roll:disabled { opacity: .35; cursor: default; }
+  .roll kbd { font: 500 10px/1 var(--sans); letter-spacing: .14em; text-transform: uppercase; padding: 7px 10px; border: 1px solid rgba(242, 237, 229, .3); border-radius: 999px; color: rgba(242, 237, 229, .82); }
+  .settings { border-top: 1px solid var(--hair); margin-top: 14px; }
+  .settings summary { list-style: none; display: flex; justify-content: space-between; align-items: center; min-height: 40px; cursor: pointer; }
+  .settings summary::-webkit-details-marker { display: none; }
+  .settings summary::after { content: "+"; font: 400 16px/1 var(--sans); color: var(--ink-2); }
+  .settings[open] summary::after { content: "\2212"; }
+  .slider { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; align-items: center; padding: 4px 0 12px; }
+  .slider output { font: 500 11px/1 var(--sans); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .slider input { grid-column: 1 / -1; width: 100%; }
+  input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; height: 18px; margin: 0; cursor: pointer; }
+  input[type=range]::-webkit-slider-runnable-track { height: 1px; background: var(--hair-strong); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--ink); margin-top: -6.5px; border: 0; }
+  input[type=range]::-moz-range-track { height: 1px; background: var(--hair-strong); }
+  input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--ink); border: 0; }
+
+  .hint {
+    position: absolute; margin: 0; pointer-events: none;
+    left: calc(var(--pad-x) + env(safe-area-inset-left));
+    bottom: calc(var(--pad-y) + env(safe-area-inset-bottom));
+    font: 400 13px/1.55 var(--sans); color: var(--ink-2);
+  }
+
+  /* ---- WebGPU fallback ---- */
+  .fallback { position: fixed; inset: 0; display: grid; place-items: center; padding: 32px; z-index: 5; pointer-events: none; }
+  .fallback[hidden] { display: none; }
+  .fallback-inner { max-width: 440px; pointer-events: auto; }
+  .fallback h2 { margin: 14px 0 10px; font: italic 400 38px/1.05 var(--serif); letter-spacing: -.02em; }
+  .fallback p { margin: 0 0 10px; font: 400 14px/1.6 var(--sans); color: var(--ink-2); }
+  .fallback code { font: 500 12px/1 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); }
+  body.no-gpu .controls, body.no-gpu .hint { opacity: .28; pointer-events: none; }
+  body.no-gpu .fallback { background: rgba(242, 237, 229, .72); }
+
+  @keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+  @keyframes dot { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .value { animation: none; } .dots i { animation: none; opacity: .7; } }
+
+  /* ---- Short landscape screens ---- */
+  @media (max-height: 620px) and (min-width: 721px) {
+    .title { font-size: clamp(52px, 7vw, 84px); }
+    .caption { display: none; }
+    .result-body { min-height: 44px; }
+    .total span { font-size: 36px; }
+    .row { min-height: 42px; }
+    .roll { height: 44px; margin-top: 10px; }
+    .objsec { padding: 8px 0; }
+    .objects { margin-top: 7px; }
+  }
+
+  /* ---- Mobile: bottom sheet, compact header ---- */
+  @media (max-width: 720px) {
+    .brand { top: calc(14px + env(safe-area-inset-top)); left: calc(18px + env(safe-area-inset-left)); }
+    .eyebrow { font-size: 10px; letter-spacing: .18em; }
+    .title { margin-top: 10px; }
+    .caption { margin-top: 10px; font-size: 12px; }
+    .caption br { display: none; }
+    .topbar { top: calc(44px + env(safe-area-inset-top)); right: calc(14px + env(safe-area-inset-right)); gap: 6px; }
+    .status { height: 32px; padding: 0 11px 0 10px; font-size: 11px; }
+    .btn { width: 32px; height: 32px; padding: 0; }
+    .btn .btn-text, .btn .sound-dot { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .ico { display: block; }
+    .controls {
+      left: 0; right: 0; bottom: 0; width: auto;
+      padding: 12px calc(18px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
+      background: rgba(242, 237, 229, .92); border-top: 1px solid var(--hair);
+    }
+    .result { padding-bottom: 8px; }
+    .result-body { min-height: 38px; margin-top: 8px; }
+    .value { width: 26px; height: 26px; border-radius: 8px; font-size: 12px; }
+    .total span { font-size: 34px; }
+    .row { min-height: 42px; grid-template-columns: 58px 1fr; }
+    .roll { height: 46px; margin-top: 10px; }
+    .roll kbd { display: none; }
+    .settings { margin-top: 10px; }
+    .objsec { padding: 8px 0 6px; }
+    .objects { display: flex; overflow-x: auto; gap: 5px; margin: 7px -18px 0; padding: 0 18px 2px; scrollbar-width: none; }
+    .objects::-webkit-scrollbar { display: none; }
+    .chip { flex: none; padding: 0 12px; }
+    .objform { margin-top: 6px; }
+    .objform input, .objform button { height: 30px; }
+    .hint { left: 0; right: 0; text-align: center; bottom: calc(var(--sheet-h) + 10px); font-size: 12px; }
+    .title { font-size: 42px; margin-top: 8px; line-height: .9; }
+    :lang(zh) .title { font-size: 36px; line-height: 1.08; }
+    :lang(zh) .title span + span { padding-left: 1em; }
+    .result { padding-bottom: 6px; }
+    .result-body { min-height: 34px; margin-top: 6px; }
+    .objsec { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; align-items: center; }
+    .objhead { display: contents; }
+    #objLabel { display: none; }
+    .objects { grid-column: 1 / -1; grid-row: 1; margin-top: 0; }
+    .objform { grid-column: 1; grid-row: 2; }
+    #objShuffle { grid-column: 2; grid-row: 2; margin-top: 6px; }
+    .objmsg { grid-column: 1 / -1; }
+    .row { min-height: 40px; }
+    .settings summary { min-height: 34px; }
+  }
+  @media (max-width: 360px) {
+    .status .status-text { display: none; }
+    .status { padding: 0 9px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="stage" aria-label="Interactive 3D scene of translucent jelly objects. Drag one to pull it, tap to poke it, drag the background to orbit the camera."></canvas>
+
+<div id="ui">
+  <header class="brand">
+    <p class="eyebrow" id="eyebrow">The Soft Play Collection<span class="sep">/</span>01</p>
+    <h1 class="title" id="title"><span>Jelly</span><span>Dice.</span></h1>
+    <p class="caption" id="caption">A little luck. <br>A little wobble. <br>Very soft odds.</p>
+  </header>
+
+  <div class="topbar">
+    <span class="status" id="gpuStatus" data-state="checking" title="Checking WebGPU…"><i aria-hidden="true"></i><span class="status-text">WebGPU</span></span>
+    <button class="btn" id="soundBtn" type="button" aria-pressed="false">
+      <span class="sound-dot" aria-hidden="true"></span>
+      <svg class="ico" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 7.5h3l4-3.5v12l-4-3.5h-3z"/><path class="wave" d="M13.5 7.2a4 4 0 0 1 0 5.6M15.6 5.2a7 7 0 0 1 0 9.6"/><path class="mute" d="M13.4 7.6l4.8 4.8M18.2 7.6l-4.8 4.8"/></svg>
+      <span class="sound-text btn-text">Sound off</span>
+    </button>
+    <button class="btn" id="langBtn" type="button" aria-label="切换到中文" lang="zh-CN">
+      <svg class="ico" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.2a6.8 6.8 0 1 0 0 13.6a6.8 6.8 0 1 0 0-13.6z"/><path d="M3.4 10h13.2M10 3.2c-2.4 2.2-2.4 11.4 0 13.6M10 3.2c2.4 2.2 2.4 11.4 0 13.6"/></svg>
+      <span class="btn-text">中文</span>
+    </button>
+    <button class="btn" id="resetViewBtn" type="button" aria-label="Reset view">
+      <svg class="ico" viewBox="0 0 20 20" aria-hidden="true"><path d="M4.6 8.4A5.8 5.8 0 1 1 5.2 13"/><path d="M3.8 4.6v4.2H8"/></svg>
+      <span class="btn-text">Reset view</span>
+    </button>
+  </div>
+
+  <section class="controls" id="controls" aria-label="Jelly controls">
+    <div class="result" id="result" data-mode="idle" aria-live="polite">
+      <div class="result-head"><span class="label" id="resultLabel">Result</span><span class="result-state" id="resultState">Preparing</span></div>
+      <div class="result-body">
+        <div class="values" id="resultValues"></div>
+        <div class="total"><small id="totalLabel">Total</small><span id="totalNum">–</span></div>
+      </div>
+    </div>
+    <div class="objsec">
+      <div class="objhead"><span class="label" id="objLabel">Object</span><button class="linkbtn" id="objShuffle" type="button">Surprise me</button></div>
+      <div class="objects" id="objects" role="radiogroup" aria-label="Objects"></div>
+      <form class="objform" id="objForm" autocomplete="off">
+        <input id="objInput" type="text" inputmode="text" enterkeyhint="go" maxlength="40" spellcheck="false" placeholder="Type an object: apple, phone…" aria-label="Type an object">
+        <button id="objGo" type="submit">Make it</button>
+      </form>
+      <p class="objmsg" id="objMsg" aria-live="polite"></p>
+    </div>
+    <div class="row">
+      <span class="label" id="flavorLabel">Flavor</span>
+      <div class="swatches" id="swatches" role="radiogroup" aria-labelledby="flavorLabel"><span class="flavor-name" id="flavorName">Emerald</span></div>
+    </div>
+    <div class="row">
+      <span class="label" id="countLabel">Dice</span>
+      <div class="segmented" id="countSeg" role="radiogroup" aria-labelledby="countLabel"></div>
+    </div>
+    <button class="roll" id="rollBtn" type="button" disabled><span class="roll-text">Roll the dice</span><kbd>Space</kbd></button>
+    <details class="settings" id="settings">
+      <summary><span class="label" id="settingsLabel">Settings</span></summary>
+      <div class="slider">
+        <label class="label" for="firmness" id="firmnessLabel">Firmness</label><output id="firmnessOut" for="firmness">55</output>
+        <input type="range" id="firmness" min="0" max="100" value="55">
+      </div>
+      <div class="slider">
+        <label class="label" for="damping" id="dampingLabel">Internal damping</label><output id="dampingOut" for="damping">40</output>
+        <input type="range" id="damping" min="0" max="100" value="40">
+      </div>
+    </details>
+  </section>
+
+  <p class="hint" id="hint">Tap to poke. Drag to pull. Let luck wobble.</p>
+</div>
+
+<noscript>
+  <!-- Shown by previews that display the file without running scripts (e.g. an in-app file preview). -->
+  <div class="fallback" role="alert" style="background: rgba(242, 237, 229, .72)">
+    <div class="fallback-inner">
+      <p class="eyebrow">The Soft Play Collection<span class="sep">/</span>01</p>
+      <h2>This preview can’t run Jelly Dice.</h2>
+      <p>It shows the page without running its scripts. Open the file in Chrome, Edge (113+) or Safari 26+ — double-click it in Finder, or drag it onto a browser window.</p>
+      <h2 lang="zh-CN">这个预览无法运行果冻骰子。</h2>
+      <p lang="zh-CN">它只显示页面、不运行脚本。请用 Chrome、Edge（113 及以上）或 Safari 26 及以上版本打开这个文件：在访达里双击，或把它拖进浏览器窗口。</p>
+    </div>
+  </div>
+</noscript>
+
+<div class="fallback" id="fallback" hidden role="alert">
+  <div class="fallback-inner">
+    <p class="eyebrow">The Soft Play Collection<span class="sep">/</span>01</p>
+    <h2 id="fallbackTitle">Jelly Dice needs WebGPU.</h2>
+    <p id="fallbackReason">This browser did not provide a WebGPU device.</p>
+    <p id="fallbackHelp">Open this page in a current desktop Chrome or Edge, Safari 26 or newer, or another browser with WebGPU enabled. On Linux, Chrome may need chrome://flags/#enable-unsafe-webgpu.</p>
+  </div>
+</div>
+
+<script type="module">
